@@ -157,4 +157,15 @@ class MLFlowFormatter:
             if self.include_keys is not None and last in self.include_keys:
                 formatted[last] = formatted.get(last, value)
 
-        return formatted
+        # Make sure keys are within the 250 characters limit
+        filtered = {}
+        for key, value in formatted.items():
+            if len(str(key)) >= 250:
+                LOGGER.error(f"Key too long {key}")
+                continue
+            if len(str(value)) >= 250:
+                LOGGER.error(f"Value too long {value}")
+                continue
+            filtered[key] = value
+
+        return filtered

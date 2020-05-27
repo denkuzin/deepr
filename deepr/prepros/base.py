@@ -2,7 +2,8 @@
 
 from abc import ABC, abstractmethod
 import logging
-from typing import Callable, Type
+import functools
+from typing import Callable
 import inspect
 
 import tensorflow as tf
@@ -76,17 +77,22 @@ class Prepro(ABC):
         raise NotImplementedError()
 
 
-def prepro(fn: Callable) -> Type:
-    """Decorator that creates a :class:`~Prepro` class from a function
+def prepro(fn: Callable = None, lazy: bool = False):
+    """Decorator that creates a prepro constructor from a function.
 
-    This decorator can be used to define :class:`~Prepro` classes in a non
-    verbose way.
+    There are 2 ways to use the decorator
+        - From a ``apply``-like function
+        - From a :class:`~Prepro` factory (a function creating a Prepro)
 
-    For example, the following snippet defines a subclass of :class:`~Prepro`
-    whose `apply` offsets each element of the dataset by `offset`:
+    From a ``apply``-like function
+    ------------------------------
+    In that case, the decorator returns a subclass of :class:`~Prepro`
+    whose ``apply`` method is defined by the decorated function.
+
+    For example
 
     >>> @prepro
-    ... def AddOffset(dataset, offset):
+    ... def AddOffset(dataset, mode, offset):
     ...     return dataset.map(lambda element: element + offset)
     >>> dataset = [0, 1, 2]
     >>> prepro_fn = AddOffset(offset=1)
@@ -103,91 +109,125 @@ def prepro(fn: Callable) -> Type:
                 Prepro.__init__(self)
                 self.offset = offset
 
-            def forward(self, dataset, mode: str = None):
+            def apply(self, dataset, mode: str = None):
                 return dataset.map(lambda element: element + self.offset)
 
-    You can also add a 'mode' argument to your preprocessor like so
+    Note that you need to use either "dataset" or "dataset" and "mode"
+    as the first two parameters.
 
-    >>> @prepro
-    ... def AddOffset(dataset, mode, offset):
-    ...     if mode == tf.estimator.ModeKeys.TRAIN:
-    ...         return dataset.map(lambda element: element + offset)
-    ...     else:
-    ...         return dataset
-    >>> dataset = [0, 1, 2]
-    >>> prepro_fn = AddOffset(offset=1)
-    >>> dataset = prepro_fn(dataset, tf.estimator.ModeKeys.TRAIN)
-    [1, 2, 3]
-    >>> dataset = prepro_fn(dataset, tf.estimator.ModeKeys.PREDICT)
-    [0, 1, 2]
+    From a :class:`~Prepro` factory
+    -------------------------------
+    Another way of using the decorator is on functions that return
+    Prepro instances. In that case, the decorator behaves differently
+    depending on the ``lazy`` argument:
+        - ``lazy=False`` (DEFAULT) : in that case, the decorator returns
+          another :class:`~Prepro` factory, whose return type is a
+          subclass of the original factory return type and whose
+          ``apply`` method is the same as the instance created by the
+          decorated factory.
+        - ``lazy=True`` : in that case, the decorator returns a subclass
+          of :class:`~Prepro` whose ``apply`` calls the factory to get
+          a prepro instance, and use its ``apply`` method.
 
-    Note that 'dataset' and 'mode' need to be the the first arguments
-    of the function IN THIS ORDER.
-
-    Another way of using the decorator is on functions that create
-    :class:`~Prepro` instances. This allows you to create factories of
-    preprocessors and make them :class:`~Prepro` classes.
-
-    For example, the following snippet defines a subclass of :class:`~Prepro`
-    whose `apply` method is the same as the prepro returned by the
-    function.
+    For example, in the non-lazy case (DEFAULT)
 
     >>> @prepro
     ... def AddOne() -> Prepro:
+    ...     print("Calling prepro")
+    ...     return AddOffset(offset=1)
+    >>> dataset = [0, 1, 2]
+    >>> prepro_fn = AddOne()
+    "Calling prepro"
+    >>> dataset = prepro_fn(dataset)
+    [1, 2, 3]
+
+    For example, in the lazy case
+
+    >>> @prepro(lazy=True)
+    ... def AddOne() -> Prepro:
+    ...     print("Calling prepro")
     ...     return AddOffset(offset=1)
     >>> dataset = [0, 1, 2]
     >>> prepro_fn = AddOne()
     >>> dataset = prepro_fn(dataset)
+    "Calling prepro"
     [1, 2, 3]
-
-    A nice feature of the `prepro` decorator is laziness: the code
-    inside the function is not executed until a call on a dataset. In
-    other words:
-
-    >>> @prepro
-    ... def MyLookup():
-    ...     table = create_table_from_file(...)
-    ...     return Map(Lookup(table, inputs="ids", outputs="indices"))
-    >>> prepro_fn = MyLookup()
-    The `table` object is not created
-    >>> dataset = prepro_fn(dataset)
-    The body of `MyLookup` gets executed
     """
     # pylint: disable=protected-access,invalid-name
-    parameters = inspect.signature(fn).parameters
-    signature = inspect.Signature([param for key, param in parameters.items() if key not in {"dataset", "mode"}])
+    def _prepro_constructor(fn: Callable) -> Callable:
+        """Decorator that creates a Layer constructor."""
+        parameters = inspect.signature(fn).parameters
+        signature = inspect.Signature([param for key, param in parameters.items() if key not in {"dataset", "mode"}])
 
-    if "dataset" in parameters:  # From an `apply` function
+        # Check order of parameters
+        if "dataset" in parameters:
+            if list(parameters.keys())[0] != "dataset":
+                raise TypeError(f"'dataset' should be the first parameter of {fn}")
+            if "mode" in parameters:
+                if list(parameters.keys())[1] != "mode":
+                    raise TypeError(f"'mode' should be the second parameter of {fn}")
 
-        if list(parameters.keys())[0] != "dataset":
-            raise TypeError(f"'dataset' should be the first positional argument.")
+        # In those cases, create a new Prepro class
+        if "dataset" in parameters or lazy:
 
-        if "mode" in parameters:
+            @functools.wraps(fn)
+            def _init(self, *args, **kwargs):
+                Prepro.__init__(self)
+                signature.bind(*args, **kwargs)
+                self._args = args
+                self._kwargs = kwargs
 
-            if list(parameters.keys())[1] != "mode":
-                raise TypeError(f"'mode' should be the second positional argument.")
+            if list(parameters.keys())[:2] == ["dataset", "mode"]:
 
-            def _apply(self, dataset: tf.data.Dataset, mode: str = None) -> tf.data.Dataset:
-                return fn(dataset, mode, *self._args, **self._kwargs)
+                def _apply(self, dataset, mode: str = None):
+                    return fn(dataset, mode, *self._args, **self._kwargs)
 
+            elif list(parameters.keys())[:1] == ["dataset"]:
+
+                def _apply(self, dataset, mode: str = None):
+                    # pylint: disable=unused-argument
+                    return fn(dataset, *self._args, **self._kwargs)
+
+            else:
+
+                def _apply(self, dataset, mode: str = None):
+                    _prepro = fn(*self._args, **self._kwargs)
+                    return _prepro.apply(dataset, mode)
+
+            attributes = {"__module__": fn.__module__, "__doc__": fn.__doc__, "__init__": _init, "apply": _apply}
+            return type(fn.__name__, (Prepro,), attributes)
+
+        # Constructor of a subclass wrapping the prepro created by fn
         else:
 
-            def _apply(self, dataset: tf.data.Dataset, mode: str = None) -> tf.data.Dataset:
-                # pylint: disable=unused-argument
-                return fn(dataset, *self._args, **self._kwargs)
+            @functools.wraps(fn)
+            def _constructor(*args, **kwargs):
+                _prepro = fn(*args, **kwargs)
+                if not isinstance(_prepro, Prepro):
+                    raise TypeError(f"Expected {Prepro} but got {type(_prepro)} from {fn}")
 
-    else:  # From a constructor
+                def _init(self):
+                    Prepro.__init__(self)
+                    self._prepro = _prepro
 
-        def _apply(self, dataset: tf.data.Dataset, mode: str = None) -> tf.data.Dataset:
-            """Create prepro during first call (lazy)"""
-            return fn(*self._args, **self._kwargs).apply(dataset=dataset, mode=mode)
+                def _apply(self, dataset, mode: str = None):
+                    return self._prepro.apply(dataset, mode)
 
-    def _init(self, *args, **kwargs):
-        # Check and store arguments for the wrapped function
-        Prepro.__init__(self)
-        signature.bind(*args, **kwargs)
-        self._args = args
-        self._kwargs = kwargs
+                def _getattr(self, name):
+                    return getattr(self._prepro, name)
 
-    attributes = {"__module__": fn.__module__, "__doc__": fn.__doc__, "__init__": _init, "apply": _apply}
-    return type(fn.__name__, (Prepro,), attributes)
+                attributes = {
+                    "__module__": fn.__module__,
+                    "__doc__": fn.__doc__,
+                    "__init__": _init,
+                    "__getattr__": _getattr,
+                    "apply": _apply,
+                }
+                return type(fn.__name__, (type(_prepro),), attributes)()
+
+            return _constructor
+
+    if fn is None:
+        return _prepro_constructor
+    else:
+        return _prepro_constructor(fn)

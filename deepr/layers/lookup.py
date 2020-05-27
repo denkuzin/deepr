@@ -92,8 +92,15 @@ class LookupFromMapping(Lookup):
 def table_from_file(name: str, path: str, key_dtype=None):
     """Create table from file"""
     LOGGER.info(f"Creating table {name} from {path}")
-    table = tf.contrib.lookup.index_table_from_file(vocabulary_file=path, name=name, key_dtype=key_dtype)
-    return table
+    return tf.contrib.lookup.index_table_from_file(vocabulary_file=path, name=name, key_dtype=key_dtype)
+
+
+def index_to_string_table_from_file(name: str, path: str, vocab_size: int = None, default_value="UNK"):
+    """Create reverse table from file"""
+    LOGGER.info(f"Creating reverse table {name} from {path}")
+    return tf.contrib.lookup.index_to_string_table_from_file(
+        vocabulary_file=path, name=name, vocab_size=vocab_size, default_value=default_value
+    )
 
 
 def table_from_mapping(name: str, mapping: Dict, default_value=None, key_dtype=None, value_dtype=None):
